@@ -94,6 +94,12 @@ struct Mesh {
     std::vector< Vec3 > triangle_normals; //triangle normals to display face normals
     std::vector<float> vunicurvature_;
     std::vector<Vec3> Laplacien;
+    std::vector<float> vcurvature_;
+    std::vector<Vec3> LaplacienBeltrami;
+    std::vector<std::vector<float>> edge_weights;
+    std::vector<float> vertex_weights;
+    std::vector<float> tshape_;
+    std::vector<float> vgausscurvature_;
 
     //Compute face normals for the display
     void computeTrianglesNormals(){
@@ -150,7 +156,6 @@ struct Mesh {
     }
 
     void calc_uniform_mean_curvature() {
-
         vunicurvature_.clear();
         Laplacien.clear();
 
@@ -176,41 +181,45 @@ struct Mesh {
     }
 
     void uniform_smooth(unsigned int _iters) {
-        std::vector<Vec3> vPrime;
-        vPrime.resize(vertices.size());
-        calc_uniform_mean_curvature();
-
         for (int i = 0; i < _iters; i++) {
+            std::vector<Vec3> vPrime;
+            vPrime.resize(vertices.size());
+            calc_uniform_mean_curvature();
+
             for (int j = 0; j < vertices.size(); j++) {
                 vPrime[j] = (vertices[j] + ((1.0/2.0)*Laplacien[j]));
             }
-        }
 
-        vertices = vPrime;
+            vertices = vPrime;
+        }
         computeNormals();
     }
 
     void taubinSmooth(float lambda, float mu, unsigned int _iters) {
-        std::vector<Vec3> vPrime;
-        vPrime.resize(vertices.size());
-        calc_uniform_mean_curvature();
-
         for (int i = 0; i < _iters; i++) {
-            if (i == 0) {
-                for (int j = 0; j < vertices.size(); j++) {
-                    vPrime[j] = (vertices[j] + (lambda*Laplacien[j]));
-                }
-            }
-            else if (i == 1) {
-               for (int j = 0; j < vertices.size(); j++) {
-                vPrime[j] = (vertices[j] + (mu*Laplacien[j]));
-            } 
-            }
-        }
+            std::vector<Vec3> vPrime;
+            vPrime.resize(vertices.size());
+            calc_uniform_mean_curvature();
 
-        vertices = vPrime;
+            bool iter = true;
+            float mult;
+    
+            for (int j = 0; j < vertices.size(); j++) {
+                if (iter) {
+                    mult = lambda;
+                } else {
+                    mult = mu;
+                }
+
+                vPrime[j] = (vertices[j] + mult * Laplacien[j]);
+            }
+
+            vertices = vPrime;
+            iter = !iter;
+        }
         computeNormals();
     }
+
 
     void addNoise() {
         for (unsigned int i = 0; i < vertices.size(); i++) {
@@ -221,6 +230,254 @@ struct Mesh {
 
             vertices[i] = Vec3(p[0] + factor * ((double)(rand())/(double)(RAND_MAX))*n[0], p[1] + factor * ((double)(rand())/(double)(RAND_MAX))*n[1], p[2] + factor * ((double)(rand())/(double)(RAND_MAX))*n[2]);
         }
+    }
+
+    void calc_triangle_quality() {
+
+        tshape_.resize(triangles.size());
+        tshape_.clear();
+
+        for (int i = 0; i < triangles.size(); ++i) {
+            Vec3 a = vertices[triangles[i].v[0]];
+            Vec3 b = vertices[triangles[i].v[1]];
+            Vec3 c = vertices[triangles[i].v[2]];
+
+            Vec3 ab, ac;
+            ab[0] = b[0] - a[0];
+            ab[1] = b[1] - a[1];
+            ab[2] = b[2] - a[2];
+    
+            ac[0] = c[0] - a[0];
+            ac[1] = c[1] - a[1];
+            ac[2] = c[2] - a[2];
+    
+            Vec3 normal = Vec3::cross(ab, ac);
+
+            double area;
+            if (normal.norm() < 1e-6) {
+                area = 1e6;
+            } else {
+                area = normal.norm()/2.0;
+            }
+
+            tshape_.push_back(area);
+        }
+    }
+
+    void calc_weights() {
+
+        edge_weights.clear();
+        vertex_weights.clear();
+        edge_weights.resize(vertices.size(), std::vector<float>(vertices.size(), 0.0f));
+        vertex_weights.resize(vertices.size(), 0.0f);
+
+
+        for( unsigned int t = 0 ; t < triangles.size() ; ++t )
+        {
+            unsigned int v0 = triangles[t][0];
+            unsigned int v1 = triangles[t][1];
+            unsigned int v2 = triangles[t][2];
+
+            Vec3 p0( vertices[v0] );
+            Vec3 p1( vertices[v1] );
+            Vec3 p2( vertices[v2] );
+
+            double p0p1_slength = (p1-p0).sqrnorm();
+            double p1p2_slength = (p2-p1).sqrnorm();
+            double p2p0_slength = (p0-p2).sqrnorm();
+
+            double dot0 = Vec3::dot(p1-p0,p2-p0);
+            double dot1 = Vec3::dot(p0-p1,p2-p1);
+            double dot2 = Vec3::dot(p0-p2,p1-p2);
+
+            if( dot0 < 0.0 )
+            {
+                Vec3 const & fakeCircumcenter = (p1+p2)/2.0;
+
+                double edge02Weight = sqrt( ( (p0+p2)/2.0 - fakeCircumcenter ).sqrnorm()  /  p2p0_slength );
+
+                edge_weights[v0][v2] += edge02Weight;
+                edge_weights[v2][v0] += edge02Weight;
+
+                double edge01Weight = sqrt( ( (p0+p1)/2.0 - fakeCircumcenter ).sqrnorm()  /  p0p1_slength );
+                edge_weights[v0][v1] += edge01Weight;
+                edge_weights[v1][v0] += edge01Weight;
+
+                double t_area = Vec3::cross( p1 - p0 , p2 - p0 ).norm() / 2.0;
+
+                vertex_weights[v0] += t_area/2.0;
+                vertex_weights[v1] += t_area/4.0;
+                vertex_weights[v2] += t_area/4.0;
+
+            }
+            else if(dot1 < 0.0)
+            {
+                Vec3 const & fakeCircumcenter = (p0+p2)/2.0;
+
+                double edge12Weight = sqrt( ( (p2+p1)/2.0 - fakeCircumcenter ).sqrnorm()  /  p1p2_slength );
+                edge_weights[v1][v2] += edge12Weight;
+                edge_weights[v2][v1] += edge12Weight;
+
+                double edge01Weight = sqrt( ( (p0+p1)/2.0 - fakeCircumcenter ).sqrnorm()  /  p0p1_slength );
+                edge_weights[v0][v1] += edge01Weight;
+                edge_weights[v1][v0] += edge01Weight;
+
+                double t_area = Vec3::cross( p1 - p0 , p2 - p0 ).norm() / 2.0;
+
+                vertex_weights[v0] += t_area/4.0;
+                vertex_weights[v1] += t_area/2.0;
+                vertex_weights[v2] += t_area/4.0;
+            }
+            else if(dot2 < 0.0)
+            {
+                Vec3 const & fakeCircumcenter = (p0+p1)/2.0;
+
+                double edge12Weight = sqrt( ( (p2+p1)/2.0 - fakeCircumcenter ).sqrnorm()  /  p1p2_slength );
+                edge_weights[v1][v2] += edge12Weight;
+                edge_weights[v2][v1] += edge12Weight;
+
+                double edge02Weight = sqrt( ( (p0+p2)/2.0 - fakeCircumcenter ).sqrnorm()  /  p2p0_slength );
+                edge_weights[v0][v2] += edge02Weight;
+                edge_weights[v2][v0] += edge02Weight;
+
+                double t_area = Vec3::cross( p1 - p0 , p2 - p0 ).norm() / 2.0;
+
+                vertex_weights[v0] += t_area/4.0;
+                vertex_weights[v1] += t_area/4.0;
+                vertex_weights[v2] += t_area/2.0;
+            }
+            else
+            {
+                double cotW0_by_2 = dot0  / ( 2.0 * sqrt(p0p1_slength*p2p0_slength-dot0*dot0) );
+                double cotW1_by_2 = dot1  / ( 2.0 * sqrt(p1p2_slength*p0p1_slength-dot1*dot1) );
+                double cotW2_by_2 = dot2  / ( 2.0 * sqrt(p1p2_slength*p2p0_slength-dot2*dot2) );
+
+                edge_weights[v1][v2] += cotW0_by_2;
+                edge_weights[v2][v1] += cotW0_by_2;
+
+                edge_weights[v0][v2] += cotW1_by_2;
+                edge_weights[v2][v0] += cotW1_by_2;
+
+                edge_weights[v1][v0] += cotW2_by_2;
+                edge_weights[v0][v1] += cotW2_by_2;
+
+                vertex_weights[v1] += cotW0_by_2 * p1p2_slength/2.0;
+                vertex_weights[v2] += cotW0_by_2 * p1p2_slength/2.0;
+
+                vertex_weights[v0] += cotW1_by_2 * p2p0_slength/2.0;
+                vertex_weights[v2] += cotW1_by_2 * p2p0_slength/2.0;
+
+                vertex_weights[v0] += cotW2_by_2 * p0p1_slength/2.0;
+                vertex_weights[v1] += cotW2_by_2 * p0p1_slength/2.0;
+            }
+        }
+
+        double total_weight_sum = 0.0;
+        for (unsigned int v = 0; v < vertices.size(); ++v) {
+                total_weight_sum += vertex_weights[v];
+        }
+
+        for (unsigned int v = 0; v < vertices.size(); ++v) {
+                vertex_weights[v] /= total_weight_sum;
+        }
+
+        total_weight_sum = 0.0;
+        for (unsigned int v0 = 0; v0 < vertices.size(); ++v0) {
+            for (unsigned int v1 = 0; v1 < vertices.size(); ++v1) {
+                total_weight_sum += edge_weights[v0][v1];
+            }
+        }
+
+        for (unsigned int v0 = 0; v0 < vertices.size(); ++v0) {
+            for (unsigned int v1 = 0; v1 < vertices.size(); ++v1) {
+                edge_weights[v0][v1] /= total_weight_sum;
+            }
+        }
+    }
+
+    void calc_mean_curvature() {
+        vcurvature_.clear();
+        LaplacienBeltrami.clear();
+        vertex_weights.clear();
+
+        std::vector<std::vector<unsigned int>> oneRing;
+        collect_one_ring (vertices, triangles, oneRing);
+
+        Vec3 mean;
+        float sum;
+
+        calc_weights();
+
+        for (int i = 0; i < vertices.size(); i++) {
+            mean = Vec3(0, 0, 0);
+            sum = 0;
+
+            for (int j = 0; j < oneRing[i].size(); j++) {
+                //for (int k = 0; k < oneRing[i].size(); k++) {
+
+                mean += vertex_weights[oneRing[i][j]]*(vertices[oneRing[i][j]]-vertices[i]);
+                sum += vertex_weights[oneRing[i][j]];
+
+                //mean += edge_weights[oneRing[i][j]][oneRing[i][k]]*(vertices[oneRing[i][j]]-vertices[i]);
+                //sum += edge_weights[oneRing[i][j]][oneRing[i][k]];
+                //}
+            }
+
+            vcurvature_.push_back(mean.length()/2.0);
+            LaplacienBeltrami.push_back((1.0/sum)*mean);
+        }
+    }
+
+    void uniform_smooth_LaplaceBeltrami(unsigned int _iters) {
+        for (int i = 0; i < _iters; i++) {
+            std::vector<Vec3> vPrime;
+            vPrime.resize(vertices.size());
+            calc_mean_curvature();
+
+            for (int j = 0; j < vertices.size(); j++) {
+               vPrime[j] = (vertices[j] + ((1.0/2.0)*LaplacienBeltrami[j]));
+            }
+
+            vertices = vPrime;
+        }
+        computeNormals();
+    }
+
+    void calc_gauss_curvature() {
+        vgausscurvature_.clear();
+
+        std::vector<std::vector<unsigned int> > oneRing;
+        collect_one_ring (vertices, triangles, oneRing);
+
+        float somme;
+        Vec3 L;
+
+        for (int i = 0; i < vertices.size(); i++) {
+            somme = 0.0;
+
+            for (int j = 0; j < oneRing[i].size(); j+=2) {
+                float angle;
+
+                if (j == oneRing[i].size() - 1) {
+                    float length1 = vertices[oneRing[i][j]].norm();
+                    float length2 = vertices[oneRing[i][0]].norm();
+
+                    angle = std::acos((vertices[oneRing[i][j]][0] * vertices[oneRing[i][0]][0] + vertices[oneRing[i][j]][1] * vertices[oneRing[i][0]][1] + vertices[oneRing[i][j]][2] * vertices[oneRing[i][0]][2]) / (length1 * length2));
+                }
+                else {
+                    float length1 = vertices[oneRing[i][j]].norm();
+                    float length2 = vertices[oneRing[i][j+1]].norm();
+
+                    angle = std::acos((vertices[oneRing[i][j]][0] * vertices[oneRing[i][j+1]][0] + vertices[oneRing[i][j]][1] * vertices[oneRing[i][j+1]][1] + vertices[oneRing[i][j]][2] * vertices[oneRing[i][j+1]][2]) / (length1 * length2));
+                
+                }
+
+                somme += angle;
+            }
+
+            vgausscurvature_.push_back(2*M_PI - somme);
+        }
+
     }
 };
 
@@ -249,13 +506,13 @@ bool display_mesh;
 DisplayMode displayMode;
 int weight_type;
 
-void updateVunicuvature() {
+void updateCurvature(std::vector<float> curvature) {
     float min, max;
-    getMinMax(min, max, mesh.vunicurvature_);
+    getMinMax(min, max, curvature);
     current_field.clear();
 
-    for (int i = 0; i < mesh.vunicurvature_.size(); i++) {
-        current_field.push_back(mesh.vunicurvature_[i]/(max-min));
+    for (int i = 0; i < curvature.size(); i++) {
+        current_field.push_back((curvature[i]-min)/(max-min));
     }
 }
 
@@ -264,7 +521,7 @@ void updateVunicuvature() {
 // -------------------------------------------
 
 static GLint window;
-static unsigned int SCREENWIDTH = 1600;
+static unsigned int SCREENWIDTH = 900;
 static unsigned int SCREENHEIGHT = 900;
 static Camera camera;
 static bool mouseRotatePressed = false;
@@ -580,8 +837,7 @@ void drawNormals(Mesh const& i_mesh){
 
 //Draw fonction
 void draw () {
-
-
+    glShadeModel(GL_FLAT);
 
     if(displayMode == LIGHTED || displayMode == LIGHTED_WIRE){
 
@@ -656,8 +912,9 @@ void idle () {
 // User inputs
 // ------------------------------------
 //Keyboard event
+int it = 0;
+
 void key (unsigned char keyPressed, int x, int y) {
-    int it = 0;
     switch (keyPressed) {
     case 'f':
         if (fullScreen == true) {
@@ -675,13 +932,35 @@ void key (unsigned char keyPressed, int x, int y) {
         break;
 
     case 'a' :
-        mesh.uniform_smooth(10);
-        updateVunicuvature();
+        mesh.uniform_smooth(30);
         break;
 
     case 'b' :
-        mesh.taubinSmooth(0.330, -0.331, 1);
-        updateVunicuvature();
+        mesh.taubinSmooth(0.330, -0.331, 30);
+        break;
+
+    case 'c' : 
+        mesh.uniform_smooth_LaplaceBeltrami(30);
+        break;
+
+    case 'd' : 
+        mesh.calc_uniform_mean_curvature();
+        updateCurvature(mesh.vunicurvature_);
+        break;
+
+    case 'e' : 
+        mesh.calc_mean_curvature();
+        updateCurvature(mesh.vcurvature_);
+        break;
+
+    case 'g' : 
+        mesh.calc_triangle_quality();
+        updateCurvature(mesh.tshape_);
+        break;
+
+    case 'h' : 
+        mesh.calc_gauss_curvature();
+        updateCurvature(mesh.vgausscurvature_);
         break;
 
     case 'n': //Press n key to display normals
@@ -785,15 +1064,17 @@ int main (int argc, char ** argv) {
     openOFF("data/elephant_n.off", mesh.vertices, mesh.normals, mesh.triangles, mesh.triangle_normals);
 
     mesh.computeNormals();
-    //mesh.addNoise();
+    mesh.addNoise();
 
     // A faire : normaliser les champs pour avoir une valeur flotante entre 0. et 1. dans current_field
     //***********************************************//
 
     current_field.clear();
 
-    mesh.calc_uniform_mean_curvature();
-    updateVunicuvature();
+    //mesh.calc_uniform_mean_curvature();
+    //mesh.calc_triangle_quality();
+    //mesh.calc_gauss_curvature();
+    //updateCurvature(mesh.vgausscurvature_);
 
     glutMainLoop ();
     return EXIT_SUCCESS;

@@ -27,6 +27,8 @@ public:
     }
     float length() const { return sqrt( squareLength() ); }
     void normalize() { float L = length(); mVals[0] /= L; mVals[1] /= L; mVals[2] /= L; }
+    inline double norm() const { return length(); }
+    inline double sqrnorm() const { return squareLength(); }
     static float dot( Vec3 const & a , Vec3 const & b ) {
        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
     }
